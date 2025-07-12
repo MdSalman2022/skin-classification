@@ -10,6 +10,9 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 import numpy as np
 import torchvision.models as models
+import os
+import torch.nn.functional as F
+import timm
 
 # Define constants from your notebook
 IMAGE_SIZE = 224
@@ -18,24 +21,52 @@ DEVICE = 'cpu'  # Vercel uses CPU
 class_names = ['akiec', 'bcc', 'bkl', 'df', 'mel', 'nv', 'vasc']  # From notebook
 
 # Placeholder for your student model class (COPY THE EXACT CLASS FROM YOUR NOTEBOOK HERE)
-# Assuming it's an ensemble of EfficientNet-B0 models. Adjust as per your exact code.
-class UnifiedEnsemble(torch.nn.Module):
-    def __init__(self, num_models=3, num_classes=NUM_CLASSES):
-        super(UnifiedEnsemble, self).__init__()
-        self.models = torch.nn.ModuleList([
-            models.efficientnet_b0(weights=None) for _ in range(num_models)
-        ])
-        for model in self.models:
-            model.classifier[1] = torch.nn.Linear(model.classifier[1].in_features, num_classes)
-        # Add any fusion layers or custom logic from your notebook
+
+# --- Simplified AntiOverfittingEnsemble for Inference ---
+class TinyViT5M(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        # Use a small ViT as TinyViT substitute for deployment
+        self.model = timm.create_model('vit_base_patch16_224', pretrained=True)
+        self.model.head = torch.nn.Identity()
+        self.feature_dim = 768
+    def forward(self, x):
+        return self.model(x)
+
+class AntiOverfittingEnsemble(torch.nn.Module):
+    def __init__(self, num_classes=NUM_CLASSES):
+        super().__init__()
+        self.efficientnet = models.efficientnet_b0(weights=None)
+        self.efficientnet.classifier[1] = torch.nn.Linear(self.efficientnet.classifier[1].in_features, num_classes)
+        self.mobilenet = models.mobilenet_v3_large(weights=None)
+        self.mobilenet.classifier[3] = torch.nn.Linear(self.mobilenet.classifier[3].in_features, num_classes)
+        self.tinyvit = TinyViT5M()
+
+        # Fusion layer
+        fusion_dim = 384
+        self.fusion = torch.nn.Sequential(
+            torch.nn.Linear(1280 + 768 + 960, fusion_dim),
+            torch.nn.ReLU(),
+            torch.nn.Linear(fusion_dim, num_classes)
+        )
 
     def forward(self, x):
-        outputs = [model(x) for model in self.models]
-        return torch.mean(torch.stack(outputs), dim=0)  # Simple average ensemble
+        # Extract features
+        eff_features = self.efficientnet.features(x)
+        eff_pooled = F.adaptive_avg_pool2d(eff_features, (1, 1)).flatten(1)
+        mob_features = self.mobilenet.features(x)
+        mob_pooled = F.adaptive_avg_pool2d(mob_features, (1, 1)).flatten(1)
+        vit_features = self.tinyvit(x)
 
-# Load the model (adjust path and loading if it's state_dict only)
-model = UnifiedEnsemble()  # Initialize your model class
-model.load_state_dict(torch.load('dynamic_ensemble_model_complete.pth', map_location=DEVICE))  # If full model: torch.load('model.pth')
+        # Concatenate features
+        all_features = torch.cat([eff_pooled, vit_features, mob_pooled], dim=1)
+        logits = self.fusion(all_features)
+        return logits
+
+# Model loading with repo-relative path
+model_path = os.path.join(os.path.dirname(__file__), '..', 'dynamic_ensemble_model_complete.pth')
+model = AntiOverfittingEnsemble()
+model.load_state_dict(torch.load(model_path, map_location=DEVICE))
 model.to(DEVICE)
 model.eval()  # Set to evaluation mode
 
@@ -47,8 +78,10 @@ test_transform = A.Compose([
 ])
 
 app = FastAPI()
-app.mount("/static", StaticFiles(directory="static"), name="static")  # For CSS/JS if needed
-templates = Jinja2Templates(directory="templates")
+static_dir = os.path.join(os.path.dirname(__file__), '..', 'static')
+templates_dir = os.path.join(os.path.dirname(__file__), '..', 'templates')
+app.mount("/static", StaticFiles(directory=static_dir), name="static")
+templates = Jinja2Templates(directory=templates_dir)
 
 # Home page with upload form (UI)
 @app.get("/", response_class=HTMLResponse)
