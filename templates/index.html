@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Skin Cancer Predictor</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { background-color: #f8f9fa; }
+        .container { max-width: 600px; margin-top: 50px; }
+        #result { margin-top: 20px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1 class="text-center mb-4">Skin Cancer Type Predictor</h1>
+        <p class="text-center">Upload a dermoscopy image to predict the cancer type using the AI model.</p>
+        <form id="upload-form" enctype="multipart/form-data">
+            <div class="mb-3">
+                <input type="file" class="form-control" id="file" accept="image/*" required>
+            </div>
+            <button type="submit" class="btn btn-primary w-100">Predict</button>
+        </form>
+        <div id="result" class="alert alert-info d-none">
+            <h4>Prediction:</h4>
+            <p id="prediction"></p>
+            <h5>Probabilities:</h5>
+            <ul id="probs"></ul>
+        </div>
+    </div>
+
+    <script>
+        document.getElementById('upload-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const formData = new FormData();
+            formData.append('file', document.getElementById('file').files[0]);
+
+            try {
+                const response = await fetch('/predict', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                // Check if response is ok and content-type is JSON
+                const contentType = response.headers.get('content-type') || '';
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    throw new Error(`Server error: ${response.status} - ${errorText}`);
+                } else if (!contentType.includes('application/json')) {
+                    const errorText = await response.text();
+                    throw new Error('Server did not return JSON. Response: ' + errorText);
+                }
+
+                const data = await response.json();
+
+                if (data.error) {
+                    alert('Error: ' + data.error);
+                } else {
+                    const resultDiv = document.getElementById('result');
+                    resultDiv.classList.remove('d-none');
+                    document.getElementById('prediction').innerText = `${data.prediction} (${data.confidence})`;
+
+                    const probsList = document.getElementById('probs');
+                    probsList.innerHTML = '';
+                    for (const [key, value] of Object.entries(data.probabilities)) {
+                        const li = document.createElement('li');
+                        li.textContent = `${key.toUpperCase()}: ${value}`;
+                        probsList.appendChild(li);
+                    }
+                }
+            } catch (error) {
+                alert('Error: ' + error.message);
+            }
+        });
+    </script>
+</body>
+</html>
